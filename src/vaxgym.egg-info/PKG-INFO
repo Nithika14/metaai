@@ -1,0 +1,163 @@
+Metadata-Version: 2.4
+Name: vaxgym
+Version: 0.2.0
+Summary: VaxGym: deterministic OpenEnv-style RL environment for VaxGuard AI cold-chain edge decisions.
+Author: VaxGym Contributors
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.24
+Provides-Extra: dev
+Requires-Dist: pytest>=7.4; extra == "dev"
+
+# VaxGym — VaxGuard AI cold-chain RL environment
+
+## What this is
+
+**VaxGym** is a **deterministic** Gym/OpenEnv-style reinforcement learning environment. An agent manages **vaccine cold-chain** delivery and on-device storage decisions under **temperature (2–8 °C)**, **battery / backup power**, **grid health**, **expiry / spoilage hazard**, **routing**, and **offline-first sync** constraints.
+
+It is built as a serious adaptation of **VaxGuard AI / Super Aura**: TMP117-grade temperature discipline, **thermochromic breach signaling**, **fan + Peltier active cooling**, **MCU power-saver modes**, **predictive spoilage pressure** (deterministic surrogate for LSTM / 48 h drift heads), **PHC connectivity**, and **tamper-aware logging** metaphors—optimized for **Meta PyTorch OpenEnv Hackathon Round 1**.
+
+## Mapping from VaxGuard AI hardware → RL MDP
+
+| Concept | In VaxGym |
+| --- | --- |
+| Internal cabinet temperature | `internal_temp_c`, 2–8 °C band |
+| TMP117 / sensor path | `sensor_health`; recalibration action |
+| Thermochromic red > 8 °C | `thermochromic_alert_state` (obs + `info`) |
+| Active cooling stack | `ACTIVATE_ACTIVE_COOLING`, battery + backup cost |
+| Low-power MCU duty cycle | `ENABLE_POWER_SAVER_MODE` |
+| Grid / generator | `electricity_status` (+ thermal multipliers) |
+| Battery + UPS | `battery_percent`, `backup_power_percent` |
+| Predictive spoilage | Accelerated `batch_expiry_minutes` under stress |
+| Offline PHC | `connectivity_status`, `sync_pending` |
+| BLE/NFC sync window | `SYNC_LOGS_WHEN_CONNECTED` when online |
+| Ultra-low-power discipline | `battery_waste` / `sync_neglect` penalties |
+
+## Why 2–8 °C matters
+
+WHO-style vaccine carriage assumes a **narrow potencies window**. Minutes outside the band compound **India-scale wastage** (crore-level INR inventory). VaxGym makes that constraint **explicit**, **measurable** (`breach_count`, thermochromic state), and **costed** in the reward.
+
+## Scenarios and tasks
+
+| `scenario` | Intent |
+| --- | --- |
+| **`urban_phc_stable`** | Baseline: decent grid, connectivity online; learn clean delivery. |
+| **`remote_phc_low_connectivity`** | Start **offline** with **`sync_pending`**: balance cooling, travel, and **future sync**. |
+| **`outage_near_expiry_crisis`** | **Grid OFF**, **short expiry**, weak cooler: aggressive **recovery** + **cooling** sequencing. |
+
+## Quick demo
+
+```bash
+cd vaxgym-vaxguard-rl
+pip install -r requirements.txt
+pip install -e .
+python -c "import vaxgym; print(vaxgym.__version__)"
+python -m pytest tests -q
+PYTHONPATH=src python src/vaxgym/cli_demo.py --scenario outage_near_expiry_crisis --seed 7 --steps 30
+```
+
+From the repo root without an editable install, set `PYTHONPATH=src` (as in the `cli_demo.py` line) so `import vaxgym` resolves.
+
+## Observation
+
+- **22-D** `float32` vector — see `src/vaxgym/models.py` (`OBS_FIELD_NAMES`).
+- Structured mirror: `VaxObservation` dataclass.
+
+## Actions
+
+Discrete **0–7** — see `src/vaxgym/enums.py` (`VaxAction`).
+
+## Reward breakdown (interpretable)
+
+Components (see `src/vaxgym/reward.py`):
+
+| Key | Meaning |
+| --- | --- |
+| `safe_delivery` | Successful handoff in-band |
+| `breach` | Temperature band violation |
+| `expiry_accel` | Spoilage hazard acceleration |
+| `battery_waste` | Unnecessary energy spend |
+| `recovery` | Cooling during acknowledged crisis |
+| `stabilize` | Effective wait/stabilize under stress |
+| `smart_redirect` | Safer alternate route |
+| `sync_neglect` | Online but logs still pending |
+| `terminal_success` / `terminal_expiry` / `terminal_spoilage` | Episode outcome |
+
+**Human-readable ledger:** `from vaxgym.reward import explain_reward`  
+Use on `info["reward_breakdown"]` after each step.
+
+## Sample `info` JSON (illustrative)
+
+```json
+{
+  "reward_breakdown": {
+    "safe_delivery": 0.0,
+    "breach": 0.0,
+    "expiry_accel": 0.0,
+    "battery_waste": 0.0,
+    "recovery": 35.0,
+    "stabilize": 0.0,
+    "smart_redirect": 0.0,
+    "sync_neglect": 0.0,
+    "terminal_success": 0.0,
+    "terminal_expiry": 0.0,
+    "terminal_spoilage": 0.0,
+    "total": 35.0
+  },
+  "temp_breach_detected": false,
+  "delivery_status": "in_transit",
+  "expiry_status": false,
+  "action_valid": true,
+  "route_selected": "primary",
+  "risk_level": "high",
+  "scenario_name": "outage_near_expiry_crisis",
+  "breach_count": 0,
+  "step_count": 1,
+  "thermochromic_alert_state": 1,
+  "sync_pending": true
+}
+```
+
+## Tests and graders
+
+Run from the `vaxgym-vaxguard-rl` directory (or pass `-C vaxgym-vaxguard-rl`). Graders exit with code **1** on failure.
+
+```bash
+python -m pytest tests -q
+python graders/grader_api_contract.py
+python graders/grader_determinism.py
+python graders/grader_edge_cases.py
+python graders/grader_hidden_tests.py
+python graders/grader_reward_contract.py
+python graders/grader_info_keys.py
+python graders/grader_scenarios.py
+python graders/grader_observation_bounds.py
+python graders/grader_invalid_actions.py
+python graders/grader_terminal_distinction.py
+python graders/grader_render_cli.py
+python graders/grader_config_usage.py
+python graders/grader_state_openenv.py
+python graders/grader_explain_reward.py
+```
+
+## Why this fits Meta OpenEnv Round 1
+
+- **Frozen contracts**: observation layout, `info` keys, deterministic `step`.
+- **`state()` + `get_state()`** for OpenEnv serialisation.
+- **Transparent physics and reward** (`config.py`, `environment.py`, `reward.py`).
+- **Heavy tests + 14 graders** including thermochromic, sync, battery drain, explainability.
+- **Credible real-world story** without hand-wavy “generic gridworld”.
+
+## Documentation
+
+- `docs/DESIGN_RATIONALE.md` — hardware → MDP narrative.
+- `docs/ENVIRONMENT_SPEC.md` — formal API and semantics.
+
+## Web dashboard (optional)
+
+`frontend/` hosts a React UI. **Note:** it targets an older API shape; align types and mock simulator with **v0.2.0** observation (`22` dims) and field names when demoing end-to-end.
+
+## License
+
+MIT.
